@@ -7,7 +7,7 @@ edition = "2021"
 ansi_term = "0.12.1"
 base64 = { version = "0.22.1", features = ["alloc", "std"] }
 promptuity = "0.0.5"
-reqwest = { version = "0.12.7", features = ["cookies", "json"] }
+reqwest = { version = "0.12.7", default-features = false, features = ["cookies", "json", "rustls-tls"] }
 rustc-hash = "2.0.0"
 scraper = "0.20.0"
 serde = { version = "1.0.210", features = ["derive"] }
