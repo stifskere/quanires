@@ -1,8 +1,9 @@
 use base64::{engine::general_purpose::URL_SAFE, Engine};
-use reqwest::{get, header::{ACCEPT, CONTENT_TYPE, HOST, ORIGIN, PRAGMA, REFERER}, Client};
+use reqwest::{get, header::{ACCEPT, CONTENT_TYPE, HOST, ORIGIN, PRAGMA, REFERER}, Client, Error as ReqwestError};
 use rustc_hash::FxHashSet;
 use scraper::{selectable::Selectable, Html, Selector};
 use serde::Deserialize;
+use thiserror::Error;
 use urlencoding::encode;
 
 #[derive(PartialEq, Eq, Hash, Clone, Default)]
@@ -12,19 +13,28 @@ pub struct AnimeEntry {
 }
 
 impl AnimeEntry {
-    pub fn name(&self) -> String {
-        self.name.clone()
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
-    pub fn url(&self) -> String {
-        self.url.clone()
+    pub fn url(&self) -> &str {
+        &self.url
     }
 }
 
-pub async fn query_anime(query: &str) -> Result<FxHashSet<AnimeEntry>, String> {
-    get(format!("https://monoschinos2.com/buscar?q={}", encode(query)))
-        .await
-        .map_or_else(|err| Err(err.to_string()), |res| Ok(res.text()))?
+#[derive(Error, Debug)]
+pub enum QueryAnimeEror {
+    #[error("No se pudo realizar la busqueda, hubo un error al hacer la solicitud: {0}")]
+    Request(#[from] ReqwestError),
+
+    #[error("La busqueda no obtuvo resultados.")]
+    NoResults
+}
+
+pub async fn query_anime(query: &str) -> Result<FxHashSet<AnimeEntry>, QueryAnimeEror> {
+    Ok(get(format!("https://monoschinos2.com/buscar?q={}", encode(query)))
+        .await?
+        .text()
         .await
         .map(|content| Html::parse_document(&content)
             .select(
@@ -38,12 +48,12 @@ pub async fn query_anime(query: &str) -> Result<FxHashSet<AnimeEntry>, String> {
                 url: anime.attr("href")?
                     .to_string()
             }))
-            .collect()
-        )
-        .map_err(|err| err.to_string())
+            .collect::<FxHashSet<AnimeEntry>>()
+        )?)
+        .and_then(|res| if res.is_empty() { Err(QueryAnimeEror::NoResults) } else { Ok(res) })
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct ChapterInfo {
     #[serde(rename = "episodio")]
     pub number: i32,
@@ -65,26 +75,36 @@ struct ChapterResponse {
     pub caps: Vec<ChapterInfo>
 }
 
-pub async fn select_chapters(url: &str) -> Result<Vec<ChapterInfo>, String> {
+#[derive(Error, Debug)]
+pub enum ChapterSelectionError {
+    #[error("No se pudieron obtener los capitulos, hubo un error al realizar la solicitud: {0}.")]
+    Request(#[from] ReqwestError),
+
+    #[error("No se pudo obtener la URL de la lista de episodios.")]
+    EpisodeListUrl,
+
+    #[error("No se pudo obtener el token CSRF para la solicitud.")]
+    Token
+}
+
+pub async fn select_chapters(url: &str) -> Result<Vec<ChapterInfo>, ChapterSelectionError> {
     let client = Client::builder()
         .cookie_store(true)
-        .build()
-        .map_err(|err| err.to_string())?;
+        .build()?;
 
     let response = client.get(url)
         .send()
+        .await?
+        .text()
         .await
-        .map_or_else(|err| Err(err.to_string()), |res| Ok(res.text()))?
-        .await
-        .map(|body| Html::parse_document(&body))
-        .map_err(|err| err.to_string())?;
+        .map(|body| Html::parse_document(&body))?;
 
     let caps_url = response.select(
         &Selector::parse("section.caplist").unwrap()
     )
         .next()
         .and_then(|element| element.attr("data-ajax"))
-        .ok_or("Couldn't get episode list URL.")?
+        .ok_or(ChapterSelectionError::EpisodeListUrl)?
         .to_string();
 
     let head_csrf = response.select(
@@ -92,7 +112,7 @@ pub async fn select_chapters(url: &str) -> Result<Vec<ChapterInfo>, String> {
     )
         .next()
         .and_then(|element| element.attr("content"))
-        .ok_or("Error retrieving CSRF token")?;
+        .ok_or(ChapterSelectionError::Token)?;
 
     let mut page_counter = 0;
     let mut result = Vec::new();
@@ -107,10 +127,9 @@ pub async fn select_chapters(url: &str) -> Result<Vec<ChapterInfo>, String> {
             .header(ACCEPT, "application/json, text/javascript, */*; q=0.01")
             .body(format!("_token={}&p={}", encode(head_csrf), page_counter))
             .send()
-            .await
-            .map_or_else(|err| Err(err.to_string()), |res| Ok(res.json::<ChapterResponse>()))?
-            .await
-            .map_err(|err| err.to_string())?;
+            .await?
+            .json::<ChapterResponse>()
+            .await?;
 
         let length = chapters.caps.len();
         page_counter += 1;
@@ -124,22 +143,28 @@ pub async fn select_chapters(url: &str) -> Result<Vec<ChapterInfo>, String> {
     Ok(result)
 }
 
-pub async fn get_play_links(url: &str) -> Result<FxHashSet<String>, String> {
-    get(url)
+#[derive(Error, Debug)]
+pub enum PlayLinksError {
+    #[error("No se pudieron obtener los enlaces, hubo un error con la solicitud.")]
+    Request(#[from] ReqwestError),
+
+    #[error("No se encontraron enlaces validos para este episodio.")]
+    NoLinks
+}
+
+pub async fn get_play_links(url: &str) -> Result<FxHashSet<String>, PlayLinksError> {
+    Ok(get(url)
+        .await?
+        .text()
         .await
-        .map_or_else(|err| Err(err.to_string()), |res| Ok(res.text()))?
-        .await
-        .map_or_else(|err| Err(err.to_string()), |content| Html::parse_document(&content)
+        .map(|content| Html::parse_document(&content)
             .select(&Selector::parse("button.play-video").unwrap())
             .filter_map(|button| button.attr("data-player")
-                .map(|attribute|
-                    URL_SAFE.decode(attribute)
-                        .map_err(|err| err.to_string())
-                        .and_then(|decoded| String::from_utf8(decoded)
-                            .map_err(|err| err.to_string())
-                        )
+                .and_then(|attribute|
+                    String::from_utf8(URL_SAFE.decode(attribute).ok()?).ok()
                 )
             )
-            .collect()
-        )
+            .collect::<FxHashSet<String>>()
+        )?)
+        .and_then(|res| if res.is_empty() { Err(PlayLinksError::NoLinks) } else { Ok(res) })
 }
