@@ -172,10 +172,6 @@ pub async fn chapter_menu
                 .find(|possible| possible.number == current.number() + 1)
                 .cloned();
 
-            if let Some(tracker) = TRACKER.get_mut() {
-
-            }
-
             Ok(Box::pin(play_menu(
                 prompt,
                 anime,
