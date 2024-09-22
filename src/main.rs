@@ -20,6 +20,8 @@ async fn main() {
         .await;
 
     if let Err(err) = program {
-        eprintln!("{err}");
+        if promptuity.with_outro(format!("Error: {err}")).finish().is_err() {
+            eprintln!("Error: {err}");
+        }
     }
 }

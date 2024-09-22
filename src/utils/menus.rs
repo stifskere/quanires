@@ -1,4 +1,4 @@
-use super::{scraper::{query_anime, select_chapters, AnimeEntry, ChapterInfo, ChapterSelectionError, QueryAnimeEror}, tracker::{EpisodeTracker, TrackerError}};
+use super::{mpv::{check_mpv, run_mpv}, scraper::{get_play_links, query_anime, select_chapters, AnimeEntry, ChapterInfo, ChapterSelectionError, QueryAnimeEror}, tracker::{EpisodeTracker, TrackerError}};
 use promptuity::{prompts::{Input, Select, SelectOption}, Error as PromptuityError, Promptuity};
 use reqwest::Error as ReqwestError;
 use thiserror::Error;
@@ -26,8 +26,6 @@ pub enum QueryMenuError {
     // it is like this in both places to mantain consistency.
 }
 
-// TODO: implement episode tracker
-
 pub async fn query_menu
 (
     prompt: &mut Promptuity<'_, Stderr>,
@@ -37,6 +35,12 @@ pub async fn query_menu
 -> Result<(), QueryMenuError> {
     if gen_start {
         start(prompt, "Bienvenido a quanires!")?;
+    }
+
+    if !check_mpv() {
+        prompt.error("No se encontro MPV.")?;
+        prompt.with_outro("Instalalo antes de continuar.").finish()?;
+        exit(-1);
     }
 
     let mut first_question = "Que deseas ver?";
@@ -222,7 +226,41 @@ pub async fn play_menu
 )
 -> Result<(), PromptuityError> {
     start(prompt, &format!("{} | Capitulo {}", anime.name(), chapter.current.number()))?;
-        
+
+    let mut options = Vec::new();
+
+    if chapter.last.is_some() {
+        options.push(SelectOption::new("Anterior episodio", "op_last_episode"));
+    }
+
+    if chapter.next.is_some() {
+        options.push(SelectOption::new("Siguiente episodio", "op_next_episode"));
+    }
+
+    if let Some(ref mut tracker) = tracker {
+        if tracker.episode_is_seen(anime.url(), &chapter.current.number()) {
+            options.push(SelectOption::new("Desmarcar como visto", "op_unwatch"));
+        }
+    }
+
+    options.extend([
+        SelectOption::new("Ver otro anime", "op_watch_other_anime"),
+        SelectOption::new("Ver otro capitulo", "op_watch_other_episode"),
+        SelectOption::new("Salir", "op_exit").with_hint("Cerrar el programa y el reproductor")
+    ]);
+
+    match get_play_links(chapter.current.url()).await {
+        Ok(links) => {
+            let _tx = run_mpv(anime.name().to_string(), chapter.current.number(), links);
+
+            // TODO: implement listening to TX.
+        },
+        Err(err) => {
+            prompt.error(format!("No se pudieron obtener los links: {err}"))?;
+        }
+    }
+
+    // TODO: implement menu handling along with possible error returned from TX.
 
     Ok(())
 }
