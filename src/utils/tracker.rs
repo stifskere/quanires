@@ -90,7 +90,7 @@ impl EpisodeTracker {
     }
 
     pub fn watch_episode(&mut self, url: &str, episode: i32) -> Result<(), TrackerError> {
-        if self.episode_is_seen(&url, &episode) {
+        if self.episode_is_seen(url, &episode) {
             return Ok(());
         }
 
@@ -105,7 +105,7 @@ impl EpisodeTracker {
     }
 
     pub fn unwatch_episode(&mut self, url: &str, episode: i32) -> Result<(), TrackerError> {
-        if !self.episode_is_seen(&url, &episode) {
+        if !self.episode_is_seen(url, &episode) {
             return Ok(());
         }
 

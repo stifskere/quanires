@@ -2,7 +2,7 @@ use super::{scraper::{query_anime, select_chapters, AnimeEntry, ChapterInfo, Cha
 use promptuity::{prompts::{Input, Select, SelectOption}, Error as PromptuityError, Promptuity};
 use reqwest::Error as ReqwestError;
 use thiserror::Error;
-use std::{io::Stderr, process::exit, sync::LazyLock};
+use std::{io::Stderr, process::exit};
 
 fn start
 (prompt: &mut Promptuity<'_, Stderr>, title: &str)
@@ -29,7 +29,11 @@ pub enum QueryMenuError {
 // TODO: implement episode tracker
 
 pub async fn query_menu
-(prompt: &mut Promptuity<'_, Stderr>, gen_start: bool)
+(
+    prompt: &mut Promptuity<'_, Stderr>,
+    gen_start: bool,
+    tracker: &mut Option<&mut EpisodeTracker>
+)
 -> Result<(), QueryMenuError> {
     if gen_start {
         start(prompt, "Bienvenido a quanires!")?;
@@ -62,8 +66,8 @@ pub async fn query_menu
 
             options.extend(
                 vec![
-                    SelectOption::new("Volver a buscar", "op_retry").with_hint("Realiza otra busqueda."),
-                    SelectOption::new("Salir", "op_quit").with_hint("Cerrar el programa.")
+                    SelectOption::new("Volver a buscar", "op_retry").with_hint("Realiza otra busqueda"),
+                    SelectOption::new("Salir", "op_quit").with_hint("Cerrar el programa")
                 ]
             );
 
@@ -77,7 +81,7 @@ pub async fn query_menu
             exit(0);
         },
         "op_retry" => {
-            Box::pin(query_menu(prompt, false)).await
+            Box::pin(query_menu(prompt, false, tracker)).await
         },
         anime_url => {
             Box::pin(chapter_menu(
@@ -86,7 +90,8 @@ pub async fn query_menu
                 query_result
                     .iter()
                     .find(|result| result.url() == anime_url)
-                    .unwrap()
+                    .unwrap(),
+                tracker
             ))
                 .await
                 .map_err(|err| QueryMenuError::Next(err.to_string()))
@@ -103,7 +108,10 @@ pub enum ChapterMenuError {
     ChapterSelection(#[from] ChapterSelectionError),
 
     #[error("{0}")]
-    Last(String)
+    Last(String),
+
+    #[error("Error del tracker: {0}")]
+    TrackerError(#[from] TrackerError)
 }
 
 pub struct ChapterSelection {
@@ -113,7 +121,12 @@ pub struct ChapterSelection {
 }
 
 pub async fn chapter_menu
-(prompt: &mut Promptuity<'_, Stderr>, gen_start: bool, anime: &AnimeEntry)
+(
+    prompt: &mut Promptuity<'_, Stderr>,
+    gen_start: bool,
+    anime: &AnimeEntry,
+    tracker: &mut Option<&mut EpisodeTracker>
+)
 -> Result<(), ChapterMenuError> {
     if gen_start {
         start(prompt, anime.name())?;
@@ -125,17 +138,27 @@ pub async fn chapter_menu
         "Que capitulo deseas ver?",
         {
             let mut options = vec![
-                SelectOption::new("Atras", "op_back").with_hint("Realiza otra busqueda."),
-                SelectOption::new("Salir", "op_quit").with_hint("Cerrar el programa.")
+                SelectOption::new("Atras", "op_back").with_hint("Realiza otra busqueda"),
+                SelectOption::new("Salir", "op_quit").with_hint("Cerrar el programa")
             ];
 
             options.extend(
                 chapters
                     .iter()
-                    .map(|chapter| SelectOption::new(
-                        format!("Capitulo {}", chapter.number()),
-                        chapter.url()
-                    ))
+                    .map(|chapter| {
+                        let mut option = SelectOption::new(
+                            format!("Capitulo {}", chapter.number()),
+                            chapter.url()
+                        );
+
+                        if let Some(ref mut tracker) = tracker {
+                            if tracker.episode_is_seen(anime.url(), &chapter.number()) {
+                                option = option.with_hint("Visto")
+                            }
+                        }
+
+                        option
+                    })
                     .collect::<Vec<SelectOption<_>>>()
             );
 
@@ -149,7 +172,7 @@ pub async fn chapter_menu
             exit(0);
         },
         "op_back" => {
-            Box::pin(query_menu(prompt, true))
+            Box::pin(query_menu(prompt, true, tracker))
                 .await
                 .map_err(|err| ChapterMenuError::Last(err.to_string()))
         },
@@ -172,6 +195,10 @@ pub async fn chapter_menu
                 .find(|possible| possible.number == current.number() + 1)
                 .cloned();
 
+            if let Some(ref mut tracker) = tracker {
+                tracker.watch_episode(anime.url(), current.number())?;
+            }
+
             Ok(Box::pin(play_menu(
                 prompt,
                 anime,
@@ -179,14 +206,20 @@ pub async fn chapter_menu
                     last: last.clone(),
                     current: current.clone(),
                     next: next.clone()
-                }
+                },
+                tracker
             )).await?)
         }
     }
 }
 
 pub async fn play_menu
-(prompt: &mut Promptuity<'_, Stderr>, anime: &AnimeEntry, chapter: &ChapterSelection)
+(
+    prompt: &mut Promptuity<'_, Stderr>,
+    anime: &AnimeEntry,
+    chapter: &ChapterSelection,
+    tracker: &mut Option<&mut EpisodeTracker>
+)
 -> Result<(), PromptuityError> {
     start(prompt, &format!("{} | Capitulo {}", anime.name(), chapter.current.number()))?;
         
